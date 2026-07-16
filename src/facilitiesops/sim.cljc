@@ -1,0 +1,97 @@
+(ns facilitiesops.sim
+  "Demo driver -- `clojure -M:run`. Walks a clean service-record logging
+  request through intake -> advise -> govern -> decide -> approval ->
+  commit at phase 1 (assisted-logging, always approval), then re-runs the
+  same op at phase 3 (supervised-auto, clean + high confidence ->
+  auto-commit), then a combined-service crew scheduling request and a
+  low-cost supply-order coordination naming a verified supplier (both
+  auto-commit clean at phase 3), then a high-cost supply-order (ALWAYS
+  escalates regardless of phase), then a facility-concern flag (ALWAYS
+  escalates, at any phase -- approve, then commit), then HARD-hold
+  scenarios: an unregistered facility, a facility registered but not yet
+  verified, a supply-order naming an unverified supplier, a proposal
+  whose own `:effect` is not `:propose`, and a proposal that has drifted
+  into the permanently-excluded access-credential/emergency-response
+  scope."
+  (:require [langgraph.graph :as g]
+            [facilitiesops.advisor :as advisor]
+            [facilitiesops.store :as store]
+            [facilitiesops.operation :as op]))
+
+(defn- exec-op [actor tid request context]
+  (g/run* actor {:request request :context context} {:thread-id tid}))
+
+(defn- approve! [actor tid]
+  (g/run* actor {:approval {:status :approved :by "facility-operations-coordinator-1"}} {:thread-id tid :resume? true}))
+
+(defn -main [& _]
+  (let [db (store/seed-db)
+        coordinator-phase-1 {:actor-id "coord-1" :actor-role :facility-operations-coordinator :phase 1}
+        coordinator-phase-3 {:actor-id "coord-1" :actor-role :facility-operations-coordinator :phase 3}
+        actor (op/build db)]
+
+    (println "== log-service-record facility-1 (phase 1, escalates -- human approves) ==")
+    (let [r (exec-op actor "t1" {:op :log-service-record :facility-id "facility-1"
+                                  :patch {:rounds-completed 4 :issues-found 0}} coordinator-phase-1)]
+      (println r)
+      (println "-- human facility operations coordinator approves --")
+      (println (approve! actor "t1")))
+
+    (println "\n== log-service-record facility-1 (phase 3, clean -- auto-commits) ==")
+    (println (exec-op actor "t2" {:op :log-service-record :facility-id "facility-1"
+                                  :patch {:rounds-completed 3 :issues-found 0}} coordinator-phase-3))
+
+    (println "\n== schedule-service-operation facility-1 (phase 3, clean -- auto-commits) ==")
+    (println (exec-op actor "t3" {:op :schedule-service-operation :facility-id "facility-1"
+                                  :patch {:crew "night-cleaning+security" :date "2026-07-20" :window "22:00-06:00"}} coordinator-phase-3))
+
+    (println "\n== coordinate-supply-order facility-1, low cost, verified supplier (phase 3, clean -- auto-commits) ==")
+    (println (exec-op actor "t4" {:op :coordinate-supply-order :facility-id "facility-1"
+                                  :patch {:item "janitorial consumables restock" :quantity 100 :estimated-cost 480.0
+                                          :supplier-id "supplier-1"}} coordinator-phase-3))
+
+    (println "\n== coordinate-supply-order facility-1, HIGH cost (ALWAYS escalates, even at phase 3) ==")
+    (let [r (exec-op actor "t5" {:op :coordinate-supply-order :facility-id "facility-1"
+                                 :patch {:item "HVAC filter replacement bulk order" :quantity 40 :estimated-cost 4200.0
+                                         :supplier-id "supplier-1"}} coordinator-phase-3)]
+      (println r)
+      (println "-- human facility operations coordinator reviews & approves --")
+      (println (approve! actor "t5")))
+
+    (println "\n== flag-facility-concern facility-1 (ALWAYS escalates, even at phase 3) ==")
+    (let [r (exec-op actor "t6" {:op :flag-facility-concern :facility-id "facility-1"
+                                 :patch {:concern "tailgating observed at loading-dock access point, smoke detector fault in stairwell B" :confidence 0.92}} coordinator-phase-3)]
+      (println r)
+      (println "-- human facility operations coordinator reviews & approves --")
+      (println (approve! actor "t6")))
+
+    (println "\n== log-service-record facility-99 (unregistered facility -> HARD hold) ==")
+    (println (exec-op actor "t7" {:op :log-service-record :facility-id "facility-99"
+                                  :patch {:rounds-completed 0}} coordinator-phase-3))
+
+    (println "\n== log-service-record facility-3 (registered but unverified -> HARD hold) ==")
+    (println (exec-op actor "t8" {:op :log-service-record :facility-id "facility-3"
+                                  :patch {:rounds-completed 1}} coordinator-phase-3))
+
+    (println "\n== coordinate-supply-order facility-1, supplier-2 unverified (-> HARD hold) ==")
+    (println (exec-op actor "t9" {:op :coordinate-supply-order :facility-id "facility-1"
+                                  :patch {:item "imported cleaning chemicals" :quantity 50 :estimated-cost 300.0
+                                          :supplier-id "supplier-2"}} coordinator-phase-3))
+
+    (println "\n== schedule-service-operation facility-1, advisor attempts direct actuation (:effect :commit) -> HARD hold ==")
+    (let [actor-direct (op/build db {:advisor (reify advisor/Advisor
+                                                (-advise [_ _ req]
+                                                  (assoc (advisor/infer nil req) :effect :commit)))})]
+      (println (exec-op actor-direct "t10" {:op :schedule-service-operation :facility-id "facility-1"
+                                           :patch {:crew "weekday-maintenance" :date "2026-07-22"}} coordinator-phase-3)))
+
+    (println "\n== log-service-record facility-1, advisor drifts into access-credential/emergency-response scope -> HARD hold, permanent ==")
+    (println (exec-op actor "t11" {:op :log-service-record :facility-id "facility-1"
+                                   :out-of-scope? true
+                                   :patch {}} coordinator-phase-3))
+
+    (println "\n== audit ledger ==")
+    (doseq [f (store/ledger db)] (println f))
+
+    (println "\n== committed coordination log ==")
+    (doseq [r (store/coordination-log db)] (println r))))

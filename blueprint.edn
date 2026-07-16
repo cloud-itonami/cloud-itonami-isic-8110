@@ -1,0 +1,12 @@
+{:itonami.blueprint/id "cloud-itonami-isic-8110"
+ :itonami.blueprint/name "Combined Facilities Support Activities"
+ :itonami.blueprint/isic-rev5 "8110"
+ :itonami.blueprint/domain :business-support/facilities
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:workplace-safety :service-transparency :labor-coordination]
+ :itonami.blueprint/governor :facilities-support-governor
+ :itonami.blueprint/robotics true
+ :itonami.blueprint/required-technologies [:robotics :identity :forms :dmn :bpmn :audit-ledger :labor]
+ :itonami.blueprint/optional-technologies []
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented}
