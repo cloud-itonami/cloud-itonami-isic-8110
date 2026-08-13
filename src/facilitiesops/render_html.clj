@@ -299,33 +299,58 @@
   [record]
   (some (fn [k] (get-in record [k :approved-by])) [:payload :value]))
 
-(defn- approval-grants
-  "Every `:approval-granted` audit fact the run states produced, as
-  `{[op facility-id] approver}`. These live in the graph's own audit
-  channel; the `:hold`/`:commit` nodes are the only writers to the store
-  ledger, so an approval is visible here even where the store did not
-  retain it. Used to JOIN the approver back in when the record itself has
-  dropped it -- so a missing approver is disclosed rather than silently
-  omitted."
+(defn- committing-runs
+  "The runs whose final disposition was `:commit`, in execution order.
+
+  `facilitiesops.store/commit-record!` is called exactly once per commit
+  node execution and this scenario is strictly sequential (each approval
+  resume happens immediately after its own request), so the Nth committed
+  record is the Nth committing run.
+
+  Pairing this way matters: joining a record to an approval on
+  `[op facility-id]` is WRONG, because a scenario that deliberately runs
+  the same op against the same facility more than once -- as this one does
+  for `:log-service-record` on `facility-1`, once approved at phase 1 and
+  once auto-committed at phase 3 -- has no unique key, and the
+  auto-committed record silently inherits the earlier record's approver.
+  That misreports an approval that never happened. `-main` checks the
+  pairing rather than trusting it."
   [runs]
-  (into {}
-        (for [r runs
-              f (get-in r [:result :state :audit])
-              :when (= :approval-granted (:t f))]
-          [[(:op f) (:facility-id f)] (:by f)])))
+  (filterv #(= :commit (get-in % [:result :state :disposition])) runs))
+
+(defn- run-approver
+  "The approver recorded in THIS run's own audit channel -- present only
+  if the graph actually paused for a human and that human approved.
+  The audit channel is the graph's, not the store's: the commit and hold
+  nodes are the store ledger's only writers, so an approval is visible
+  here even where the store did not retain it."
+  [run]
+  (some #(when (= :approval-granted (:t %)) (:by %))
+        (get-in run [:result :state :audit])))
+
+(defn- pairing-mismatches
+  "Records paired with a run of a different op/facility -- i.e. proof that
+  the positional pairing above does not hold for this scenario. Empty is
+  the only acceptable answer; `-main` refuses to render otherwise."
+  [records runs]
+  (keep (fn [[rec run]]
+          (when-not (and (= (:op rec) (get-in run [:request :op]))
+                         (= (:facility-id rec) (get-in run [:request :facility-id])))
+            {:record (select-keys rec [:op :facility-id])
+             :run (select-keys (:request run) [:op :facility-id])
+             :tid (:tid run)}))
+        (map vector records runs)))
 
 (defn- approver-cell
-  "The honest approver disclosure for one committed record: retained,
-  joined-from-audit, or genuinely nobody."
-  [grants record]
-  (let [k [(:op record) (:facility-id record)]]
+  "The honest approver disclosure for one committed record, given the run
+  that produced it: retained in the record, joined back from that run's
+  audit channel, or genuinely nobody."
+  [record run]
+  (let [in-record (approver-in-record record)
+        in-audit (run-approver run)]
     (cond
-      (approver-in-record record)
-      (ok (str (approver-in-record record) " — retained in record"))
-
-      (contains? grants k)
-      (warn (str (get grants k) " (audit only; not retained in record)"))
-
+      in-record (ok (str in-record " — retained in record"))
+      in-audit (warn (str in-audit " (audit only; not retained in record)"))
       :else (dim "no human approval — auto-committed"))))
 
 (defn- escalation-reason
@@ -470,15 +495,15 @@
      (table ["Thread" "Op" "Facility" "Escalation reason" "Human decision" "Approver" "Final disposition"] rows))))
 
 (defn- commits-section [db runs]
-  (let [grants (approval-grants runs)
-        records (store/coordination-log db)
-        rows (for [r records]
+  (let [records (store/coordination-log db)
+        paired (map vector records (committing-runs runs))
+        rows (for [[r run] paired]
                (tr (code (:op r))
                    (code (:facility-id r))
                    (esc (kv (:payload r)))
-                   (approver-cell grants r)))
-        approved (filter #(contains? grants [(:op %) (:facility-id %)]) records)
-        retained (filter approver-in-record approved)
+                   (approver-cell r run)))
+        approved (filter (fn [[_ run]] (run-approver run)) paired)
+        retained (filter (fn [[r _]] (approver-in-record r)) approved)
         disclosure
         (cond
           (empty? approved)
@@ -487,16 +512,17 @@
           (= (count retained) (count approved))
           (str "Measured, not assumed: " (count retained) " of " (count approved)
                " human-approved commits carry " (code ":approved-by")
-               " inside the stored record, so this store retains who approved. The remaining "
-               (- (count records) (count approved))
-               " records were auto-committed under the phase-3 auto rule — those show no approver because "
-               "nobody approved them, which is a different statement from the approver having been lost.")
+               " inside the stored record, so this store does retain who approved — "
+               (code "commit-record!") " stores the whole record rather than destructuring a single "
+               "register out of it. The other " (- (count records) (count approved))
+               " records were auto-committed under the phase-3 auto rule, and show no approver because "
+               "nobody approved them — a different statement from the approver having been lost.")
 
           :else
           (str "Measured, not assumed: only " (count retained) " of " (count approved)
                " human-approved commits kept " (code ":approved-by") " in the stored record. The rest are "
-               "shown as “audit only; not retained in record”, joined back from the graph's audit channel — "
-               "the approval demonstrably happened, but this store did not keep it."))]
+               "shown as “audit only; not retained in record”, joined back from the producing run's audit "
+               "channel — the approval demonstrably happened, but this store did not keep it."))]
     (section
      "Committed coordination log + approver attribution"
      (str "The records " (code "facilitiesops.store/commit-record!") " actually wrote. The approver column is "
@@ -609,7 +635,9 @@
         hard (filter hard-hold? ledger)
         rules (into (sorted-set) (mapcat #(map :rule (:violations %)) hard))
         records (store/coordination-log db)
-        orphans (remove #(store/facility-record db (:facility-id %)) records)]
+        orphans (remove #(store/facility-record db (:facility-id %)) records)
+        committers (committing-runs runs)
+        mismatches (pairing-mismatches records committers)]
 
     ;; Build-time invariants. The page's whole claim is that the governor
     ;; actually refuses things, so a run that refused nothing must fail
@@ -627,6 +655,17 @@
     (when (seq orphans)
       (throw (ex-info "committed record names a facility absent from the store"
                       {:orphans (mapv :facility-id orphans)})))
+    ;; Approver attribution is only honest if each record is matched to
+    ;; the run that actually produced it. Check the positional pairing
+    ;; instead of assuming it: an off-by-one here would attribute one
+    ;; record's approver to a neighbouring auto-commit, which is exactly
+    ;; the failure this page must not print.
+    (when (not= (count records) (count committers))
+      (throw (ex-info "committed records and committing runs disagree — cannot attribute approvers"
+                      {:records (count records) :committing-runs (count committers)})))
+    (when (seq mismatches)
+      (throw (ex-info "record/run pairing is misaligned — approver attribution would be wrong"
+                      {:mismatches (vec mismatches)})))
 
     (spit out (render result))
     (println "wrote" out)
