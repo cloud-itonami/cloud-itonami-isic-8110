@@ -42,7 +42,7 @@
   no refusal in it would be a passing build reporting nothing, so the
   requirement is a build-time invariant rather than a convention.
 
-  Usage: `clojure -M:dev:render-html [out-file]`
+  Usage: `kbb -M:dev:render-html [out-file]`
   (default `docs/samples/operator-console.html`)."
   (:require [jp-go-dds.skin]
             [kotoba.lang.text :as str]
@@ -598,7 +598,7 @@
            "emergency-response protocol — those are permanently outside its charter, enforced by a HARD rule "
            "you can see firing below rather than by a convention.")
       (table ["Property" "Value"]
-             [(tr "Generator" (str (code "facilitiesops.render-html") " — " (code "clojure -M:dev:render-html")))
+             [(tr "Generator" (str (code "facilitiesops.render-html") " — " (code "kbb -M:dev:render-html")))
               (tr "Actor graph" (str (code "facilitiesops.operation") " on " (code "langgraph.graph/run*")))
               (tr "Compliance layer" (code "facilitiesops.governor"))
               (tr "SSoT" (str (code "facilitiesops.store") " — seeded " (code "MemStore")))
