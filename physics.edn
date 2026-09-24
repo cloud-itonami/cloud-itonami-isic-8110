@@ -1,0 +1,34 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:dev:physics` runs it.
+;;
+;; README "Robotics premise": robots may do floor-cleaning, patrol assistance
+;; and materials handling for a combined facilities-support contractor
+;; (ISIC 8110), with this actor as the coordination layer. The physical work
+;; declared here: a materials-handling cart hauling supplies up the parking
+;; garage ramp to the building's service entrance, and a floor-scrubber robot
+;; draining its recovery (dirty-water) tank at the dump station.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+;; Replacing an estimate with a sourced value is this bot's growth work.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isic-8110"
+ :cases
+ [{:id :supplies-up-garage-ramp
+   :kind :transport
+   :procedure "materials-handling cart hauls a pallet of cleaning and maintenance supplies up the parking-garage ramp to the service entrance"
+   :params {:mass-kg 100.0 :payload-kg 150.0 :distance-m 40.0 :v-max-mps 1.0 :a-max-mps2 0.5
+            :brake-decel-mps2 0.8 :drive-force-n 300.0 :crr 0.015
+            :cog-height-m 0.40 :payload-cog-height-m 0.60 :support-half-length-m 0.45
+            :max-time-s 1800.0}
+   :sweep {:param :slope-deg :values [0.0 2.0 4.0 6.0 7.5]}
+   :quantity :cycle-time-s
+   :limit {:max 60.0 :basis "estimate: one ramp leg inside the loading-dock slot shared with delivery vehicles"}
+   :boundary {:lo 0.0 :hi 10.0}}
+  {:id :scrubber-recovery-tank-drain
+   :kind :tank-drain
+   :procedure "floor-scrubber robot drains its recovery (dirty-water) tank through the drain hose at the dump station"
+   :params {:tank-area-m2 0.25 :h0-m 0.30 :h-target-m 0.02 :cd 0.62 :q-in-m3s 0.0 :dt-s 0.1}
+   :sweep {:param :orifice-area-m2 :values [2.84e-4 4.91e-4 8.04e-4 1.134e-3]}
+   :quantity :time-to-target-s
+   :limit {:max 120.0 :basis "estimate: dump-station stop must fit a 2-minute slot between cleaning passes; hose bores 19/25/32/38 mm, Cd 0.62 sharp-edged orifice"}
+   :boundary {:lo 1.5e-4 :hi 1.5e-3}}]}
